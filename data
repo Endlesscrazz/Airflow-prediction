@@ -1,0 +1,9 @@
+from scipy.io import loadmat
+
+# Load the .mat file
+mat_data = loadmat("/Users/shreyas/Desktop/UoU/Independent-Study/Airflow-model/dataset_new/FanPower_1.6V/temp_2025-3-7-19-14-21_21.4_35_13.6_.mat")
+
+# frames = mat_data["big_array"]
+# print(f"Shape of big_array: {frames.shape}")
+#Print the keys in the .mat file
+print(mat_data.keys())
