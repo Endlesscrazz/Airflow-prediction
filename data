@@ -1,9 +1,61 @@
-from scipy.io import loadmat
 
-# Load the .mat file
-mat_data = loadmat("/Users/shreyas/Desktop/UoU/Independent-Study/Airflow-model/dataset_new/FanPower_1.6V/temp_2025-3-7-19-14-21_21.4_35_13.6_.mat")
+import os
+import numpy as np
+import scipy.io
 
-# frames = mat_data["big_array"]
-# print(f"Shape of big_array: {frames.shape}")
-#Print the keys in the .mat file
-print(mat_data.keys())
+def get_frame_shape(mat_filepath):
+    """
+    Load the .mat file and return the shape of the frames.
+    If TempFrames is 2D, return its shape.
+    If TempFrames is 3D, return (n_frames, height, width).
+    If TempFrames is a 1D object array (of frames), attempt to stack them
+    and return the shape of the first frame.
+    """
+    try:
+        # Load the .mat file; loadmat returns a dictionary.
+        data = scipy.io.loadmat(mat_filepath, squeeze_me=True)
+        # Check that 'TempFrames' exists in the loaded dictionary.
+        if "TempFrames" not in data:
+            print(f"File {mat_filepath} does not contain 'TempFrames'.")
+            return None
+        
+        # Extract the actual frames.
+        frames = data["TempFrames"]
+        
+        # Now use frames.shape (not data.shape).
+        if isinstance(frames, np.ndarray):
+            if frames.ndim == 1 or (frames.dtype == object):
+                # Assume it's a list of frames; try stacking them.
+                frames_list = [np.asarray(frame) for frame in frames]
+                return frames_list[0].shape if frames_list else None
+            elif frames.ndim == 2:
+                return frames.shape
+            elif frames.ndim == 3:
+                return frames.shape
+            else:
+                return None
+        else:
+            return None
+    except Exception as e:
+        print(f"Error reading {mat_filepath}: {e}")
+        return None
+
+def main():
+    # Set the dataset folder path (adjust if needed)
+    dataset_folder = os.path.join(os.getcwd(), "dataset_new")
+    
+    # Walk through each subfolder in the dataset folder.
+    for folder in os.listdir(dataset_folder):
+        folder_path = os.path.join(dataset_folder, folder)
+        if not os.path.isdir(folder_path):
+            continue
+        
+        # Process each .mat file in the subfolder.
+        for file in os.listdir(folder_path):
+            if file.endswith(".mat"):
+                file_path = os.path.join(folder_path, file)
+                shape = get_frame_shape(file_path)
+                print(f"File: {file} in folder '{folder}' has frame shape: {shape}")
+
+if __name__ == "__main__":
+    main()

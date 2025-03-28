@@ -11,41 +11,87 @@ from sklearn.linear_model import LinearRegression
 from scipy.io import loadmat
 from skimage import io
 from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
-from sklearn.linear_model import LinearRegression
 from sklearn.metrics import mean_squared_error, r2_score
 from sklearn.model_selection import LeaveOneOut
+from sklearn.impute import SimpleImputer  # <-- New import for imputation
 
+# Reload your roi_detection module if needed
 importlib.reload(roi_detection)
 from roi_detection import extract_roi_features
 
-# Flags to select models
+# --------------------------
+# MODEL SELECTION FLAGS
+# --------------------------
 use_rf = True
-use_lr = True
+use_lr = False
 use_gb = True
 
-def parse_airflow_rate(filename):
+# --------------------------
+# ROI CONFIGURATIONS
+# --------------------------
+ROI_CONFIGS = {
+    1.6: {
+        "i_spot_center": [340, 300, 400],
+        "j_spot_center": [305, 300, 400],
+        "m_array": [2, 4, 4]
+    },
+    1.8: {
+        "i_spot_center": [340, 300, 400],
+        "j_spot_center": [305, 300, 400],
+        "m_array": [2, 4, 4]
+    },
+    2.1: {
+        "i_spot_center": [340, 300, 400],
+        "j_spot_center": [305, 300, 400],
+        "m_array": [2, 4, 4]
+    },
+    2.4: {
+        "i_spot_center": [311, 300, 400],
+        "j_spot_center": [252, 300, 400],
+        "m_array": [2, 4, 4]
+    }
+}
+
+# --------------------------
+# 1) Parse Airflow Rate from Folder Name
+# --------------------------
+def parse_airflow_rate(folder_name):
     """
-    Extract the numeric flow rate from the file name.
-    Args:
-        filename (str): Example: "Rec_LW_Gypsum_fan_1.6v_T_90F-051_23_48_29_966_ON.mat".
-    Returns:
-        float: Extracted airflow rate.
+    Extract the numeric airflow rate (fan voltage) from a folder name like 'FanPower_1.6V'.
+    Returns float if found, otherwise raises ValueError.
     """
-    match = re.search(r'fan_(\d+(\.\d+)?)v', filename)
+    match = re.search(r'FanPower_(\d+(\.\d+)?)V', folder_name, re.IGNORECASE)
     if match:
         return float(match.group(1))
     else:
-        raise ValueError(f"Could not parse airflow rate in: {filename}")
+        raise ValueError(f"Could not parse airflow rate from folder name: {folder_name}")
 
+# --------------------------
+# 2) Parse Delta T from .mat File Name
+# --------------------------
+def parse_delta_T(mat_filename):
+    """
+    Extract delta T from the .mat file name.
+    Example: 'temp_2025-3-7-19-14-21_21.4_35_13.6_.mat' -> 13.6
+    We'll look for the second-to-last token before '.mat'.
+    """
+    base_name = mat_filename.replace('.mat', '')
+    tokens = base_name.split('_')
+    if len(tokens) < 2:
+        return None
+    dt_str = tokens[-2] if tokens[-1] == '' else tokens[-1]
+    dt_str = dt_str.strip('_')
+    try:
+        return float(dt_str)
+    except ValueError:
+        print(f"Warning: Could not parse delta T from {mat_filename}, got '{dt_str}'")
+        return None
 
+# --------------------------
+# IRVideoProcessing Class
+# --------------------------
 class IRVideoProcessing:
     def __init__(self, mat_filepath, png_folder=None):
-        """
-        Initialize the IRVideoProcessing class.
-        Args:
-            mat_filepath (str): Path to the .mat file.
-            png_folder (str): Folder containing .png frames (optional).
-        """
         self.mat_filepath = mat_filepath
         self.png_folder = png_folder
         self.data = self.load_mat_data()
@@ -55,29 +101,16 @@ class IRVideoProcessing:
 
     def load_mat_data(self):
         try:
-            
             mat_data = loadmat(self.mat_filepath, squeeze_me=True)
-            frames = mat_data["big_array"]
-
-            # Debugging: Print the type and shape of big_array
-            # print(f"[DEBUG] Raw big_array type: {type(frames)}, shape: {frames.shape}")
-
-            # Handling different cases for big_array
+            frames = mat_data["TempFrames"]
             if frames.ndim == 1 or (frames.dtype == object):
-                # If big_array is a 1D array (of 2D frames),need to stack them into a 3D array
                 frames = np.stack([np.asarray(frame) for frame in frames])
             elif frames.ndim == 2:
-                # If big_array is a 2D array, neded to reshape it into a 3D array with 1 frame
                 frames = frames[np.newaxis, :, :]
             elif frames.ndim == 3:
-                
                 pass
             else:
-                raise ValueError(f"Unexpected shape for big_array: {frames.shape}")
-
-            # Debugging: Print the final shape of frames
-            # print(f"[DEBUG] Final frames shape: {frames.shape}")
-
+                raise ValueError(f"Unexpected shape for TempFrames: {frames.shape}")
             frames = frames / 255.0
             return frames
         except Exception as e:
@@ -115,7 +148,6 @@ class IRVideoProcessing:
         if self.data is None:
             return None
         num_frames = self.data.shape[0]
-        # Allocate the temporary array based on ROI dimensions if provided
         if roi is not None:
             temp_grad = np.zeros((num_frames, roi[3], roi[2]))
         else:
@@ -131,24 +163,8 @@ class IRVideoProcessing:
         return self.temporal_gradient_data
 
     def extract_features(self, num_segments=1, roi=None):
-        """
-        Extract features from IR video data (with optional temporal segmentation and ROI).
-        Args:
-            num_segments (int): Number of temporal segments.
-            roi (tuple): (x, y, width, height) for ROI.
-        Returns:
-            dict: Extracted features.
-        """
         try:
-            # Debugging: Print the shape of self.data
-            # print(f"[DEBUG] Shape of self.data: {self.data.shape}")
-
-            # ROI if provided
             data_used = self.data[:, roi[1]:roi[1]+roi[3], roi[0]:roi[0]+roi[2]] if roi else self.data
-
-            # Debugging: Print the shape of data_used
-            # print(f"[DEBUG] Shape of data_used: {data_used.shape}")
-
             features = {}
             if num_segments == 1:
                 frame_max = np.max(data_used, axis=(1, 2))
@@ -189,7 +205,7 @@ class IRVideoProcessing:
                     features[f"seg{seg+1}_overall_max"] = np.max(seg_max)
                     features[f"seg{seg+1}_overall_mean"] = np.mean(seg_mean)
                     features[f"seg{seg+1}_overall_std"] = np.mean(seg_std)
-                    # Spatial gradient for the segment
+
                     seg_spatial = []
                     for frame in seg_data:
                         gx = np.gradient(frame, axis=0)
@@ -199,7 +215,7 @@ class IRVideoProcessing:
                     seg_avg_spatial = np.mean(seg_spatial, axis=(1, 2))
                     features[f"seg{seg+1}_mean_spatial_grad"] = np.mean(seg_avg_spatial)
                     features[f"seg{seg+1}_std_spatial_grad"] = np.std(seg_avg_spatial)
-                    # Temporal gradient for the segment
+
                     seg_temp = np.zeros_like(seg_data)
                     if seg_data.shape[0] > 1:
                         seg_temp[:-1] = np.abs(seg_data[1:] - seg_data[:-1])
@@ -210,6 +226,7 @@ class IRVideoProcessing:
                     else:
                         features[f"seg{seg+1}_mean_temp_grad"] = 0
                         features[f"seg{seg+1}_std_temp_grad"] = 0
+
                     if self.png_frames is not None:
                         png_used = self.png_frames[:, roi[1]:roi[1]+roi[3], roi[0]:roi[0]+roi[2]] if roi else self.png_frames
                         png_seg = png_used[start:end]
@@ -219,14 +236,15 @@ class IRVideoProcessing:
             print(f"Error in extract_features: {e}")
             return None
 
-
+# --------------------------
+# Optional: Excel features if needed
+# --------------------------
 def extract_excel_features(excel_path, sheet_name):
     try:
         df = pd.read_excel(excel_path, sheet_name=sheet_name)
     except Exception as e:
         print(f"Error reading Excel file {excel_path} (sheet: {sheet_name}): {e}")
         return None
-
     return {
         "mean_rtd": df["RTD (°C)"].mean(),
         "mean_dp": df["ΔP (Pa)"].mean(),
@@ -236,60 +254,82 @@ def extract_excel_features(excel_path, sheet_name):
         "rate_of_change_dp": np.mean(np.diff(df["ΔP (Pa)"]))
     }
 
-
-def process_dataset(dataset_folder, excel_path, num_segments=1, roi=None, i_spot_center=None, j_spot_center=None, m_array=None):
+# --------------------------
+# 3) Main Process Dataset
+# --------------------------
+def process_dataset(dataset_folder, excel_path, num_segments=1, roi=None):
+    """
+    dataset_folder structure:
+      dataset_new/
+        FanPower_1.6V/
+          temp_2025-3-7-19-14-21_21.4_35_13.6_.mat
+          ...
+        FanPower_1.8V/
+          ...
+    We parse the airflow rate from 'FanPower_1.6V' -> 1.6,
+    parse the delta T from the .mat file name -> e.g. 13.6,
+    then select the corresponding ROI configuration based on ROI_CONFIGS.
+    """
     features_list = []
-    # Loop over all items in the dataset folder
-    for item in os.listdir(dataset_folder):
-        item_path = os.path.join(dataset_folder, item)
-        # If it's a file that ends with .mat, process it;
-        # otherwise, if it's a directory, try to find a .mat file inside it.
-        if os.path.isfile(item_path) and item.endswith(".mat"):
-            folder_name = os.path.splitext(item)[0]  # use the filename (without extension) as folder_name
-            mat_filepath = item_path
-        elif os.path.isdir(item_path):
-            folder_name = item
-            mat_files = [f for f in os.listdir(item_path) if f.endswith(".mat")]
-            if not mat_files:
-                print(f"No .mat file found in folder: {item}")
-                continue
-            mat_filepath = os.path.join(item_path, mat_files[0])
-        else:
+    # Iterate through subfolders (e.g., FanPower_1.6V, FanPower_1.8V, etc.)
+    for folder_name in os.listdir(dataset_folder):
+        folder_path = os.path.join(dataset_folder, folder_name)
+        if not os.path.isdir(folder_path):
             continue
 
         try:
-            # print(f"Processing: {folder_name}")
-            airflow_rate = parse_airflow_rate(os.path.basename(mat_filepath))
-            # item_path as png_folder if a directory; otherwise, if it's a file, PNGS in same folder
-            png_folder = item_path if os.path.isdir(item_path) else dataset_folder
-            ir_video = IRVideoProcessing(mat_filepath, png_folder)
-            ir_features = ir_video.extract_features(num_segments=num_segments, roi=roi)
-            sheet_name = f"{airflow_rate}V"
-            # print(f"Using Excel sheet '{sheet_name}' for {folder_name}")
-            
-            # Excel extraction is optional; if excel file doesn't exist, use empty dict.
-            if os.path.exists(excel_path):
-                excel_features = extract_excel_features(excel_path, sheet_name)
-                if excel_features is None:
-                    excel_features = {}
-            else:
-                excel_features = {}
-                
-            roi_features = extract_roi_features(mat_filepath, i_spot_center, j_spot_center, m_array)
-            if roi_features is None:
-                continue
-            
-            combined_features = {**ir_features, **excel_features, **roi_features, "airflow_rate": airflow_rate}
-            features_list.append(combined_features)
-        except Exception as e:
-            print(f"Error processing {folder_name}: {e}")
+            airflow_rate = parse_airflow_rate(folder_name)
+        except ValueError as e:
+            print(f"Skipping folder '{folder_name}' - {e}")
             continue
+
+        if airflow_rate not in ROI_CONFIGS:
+            print(f"No ROI config found for airflow_rate={airflow_rate}, skipping folder.")
+            continue
+        roi_cfg = ROI_CONFIGS[airflow_rate]
+        i_spot_center = np.array(roi_cfg["i_spot_center"])
+        j_spot_center = np.array(roi_cfg["j_spot_center"])
+        m_array = np.array(roi_cfg["m_array"])
+
+        mat_files = [f for f in os.listdir(folder_path) if f.endswith(".mat")]
+        if not mat_files:
+            print(f"No .mat files found in folder: {folder_name}")
+            continue
+
+        for mat_file in mat_files:
+            mat_filepath = os.path.join(folder_path, mat_file)
+            try:
+                delta_T = parse_delta_T(mat_file)
+                ir_video = IRVideoProcessing(mat_filepath, png_folder=folder_path)
+                ir_features = ir_video.extract_features(num_segments=num_segments, roi=roi)
+                sheet_name = f"{airflow_rate}V"
+                if os.path.exists(excel_path):
+                    excel_features = extract_excel_features(excel_path, sheet_name)
+                    if excel_features is None:
+                        excel_features = {}
+                else:
+                    excel_features = {}
+                roi_features = extract_roi_features(mat_filepath, i_spot_center, j_spot_center, m_array)
+                if roi_features is None:
+                    continue
+                combined_features = {
+                    **ir_features,
+                    **excel_features,
+                    **roi_features,
+                    "airflow_rate": airflow_rate,
+                    "delta_T": delta_T
+                }
+                features_list.append(combined_features)
+            except Exception as e:
+                print(f"Error processing {mat_file} in folder {folder_name}: {e}")
+                continue
 
     return pd.DataFrame(features_list)
 
-
+# --------------------------
+# 4) Train and Evaluate
+# --------------------------
 def train_and_evaluate(df):
-
     model_list = []
     if use_rf:
         model_list.append(("RandomForest", RandomForestRegressor(n_estimators=100, random_state=42)))
@@ -301,55 +341,55 @@ def train_and_evaluate(df):
     X = df.drop(columns=["airflow_rate"])
     y = df["airflow_rate"]
 
-    # Remove low intensity features (assumed non-contributory)
     low_intensity_features = ["seg1_mean_png_intensity", "seg2_mean_png_intensity", "seg3_mean_png_intensity", "mean_png_intensity"]
     for feat in low_intensity_features:
         if feat in X.columns:
             X = X.drop(columns=[feat])
     
-    loo = LeaveOneOut()
+    X = X.dropna(axis=1, how='all')
 
-    model_preds = {name: [] for (name,_) in model_list}
+    # Replace missing values using SimpleImputer
+    imputer = SimpleImputer(strategy='mean')
+    X = pd.DataFrame(imputer.fit_transform(X), columns=X.columns)
+
+    loo = LeaveOneOut()
+    model_preds = {name: [] for (name, _) in model_list}
     ensemble_preds = []
     actuals = []
-    
+
     for train_idx, test_idx in loo.split(X):
         X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
         y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
-        
-        # Train each selected model
+
         for name, model in model_list:
             model.fit(X_train, y_train)
-        
-        # Make predictions
+
         fold_preds = {}
         for name, model in model_list:
             pred = model.predict(X_test)
             model_preds[name].append(pred[0])
             fold_preds[name] = pred[0]
-        
-        # Compute ensemble prediction (average over selected models)
+
         ensemble_pred = np.mean([fold_preds[name] for name, _ in model_list])
         ensemble_preds.append(ensemble_pred)
         actuals.append(y_test.values[0])
-    
-    # Calculate metrics for each model
+
     for name, _ in model_list:
         mse = mean_squared_error(actuals, model_preds[name])
         r2 = r2_score(actuals, model_preds[name])
         print(f"{name} Mean Squared Error: {mse}")
         print(f"{name} R² Score: {r2}")
-    
-    # Calculate ensemble metrics
+
     mse_ensemble = mean_squared_error(actuals, ensemble_preds)
     r2_ensemble = r2_score(actuals, ensemble_preds)
     print("---------------------------------")
     print(f"Ensemble Mean Squared Error: {mse_ensemble}")
     print(f"Ensemble R² Score: {r2_ensemble}")
 
-    
+# --------------------------
+# 5) Plot Learning Curve
+# --------------------------
 def plot_learning_curve(df):
-    # using a custom ensemble regressor that averages predictions from the three base models.
     from sklearn.base import BaseEstimator, RegressorMixin
 
     selected_models = []
@@ -363,21 +403,25 @@ def plot_learning_curve(df):
     class EnsembleRegressor(BaseEstimator, RegressorMixin):
         def __init__(self, models=None):
             self.models = models if models is not None else []
-        
+
         def fit(self, X, y):
             for m in self.models:
                 m.fit(X, y)
             return self
-        
+
         def predict(self, X):
             if not self.models:
-                return np.zeros(len(X))  # If no models selected, return zeros
+                return np.zeros(len(X))
             preds = [m.predict(X) for m in self.models]
-            # Average predictions across selected models
             return np.mean(preds, axis=0)
 
     X = df.drop(columns=["airflow_rate"])
     y = df["airflow_rate"]
+
+    X = X.dropna(axis=1, how='all')
+    # Impute missing values in X using SimpleImputer
+    imputer = SimpleImputer(strategy='mean')
+    X = pd.DataFrame(imputer.fit_transform(X), columns=X.columns)
 
     estimator = EnsembleRegressor(models=selected_models)
 
@@ -389,6 +433,7 @@ def plot_learning_curve(df):
     )
     train_scores_mean = -np.mean(train_scores, axis=1)
     validation_scores_mean = -np.mean(validation_scores, axis=1)
+
     plt.figure(figsize=(8, 6))
     plt.plot(train_sizes, train_scores_mean, 'o-', label='Training Error')
     plt.plot(train_sizes, validation_scores_mean, 'o-', label='Validation Error')
@@ -399,26 +444,22 @@ def plot_learning_curve(df):
     plt.grid(True)
     plt.show()
 
-
-
+# --------------------------
+# Main Execution
+# --------------------------
 if __name__ == "__main__":
-    dataset_folder = os.path.join(os.getcwd(), "dataset")
-    excel_path = os.path.join(os.getcwd(), "dataset", "DAQ_LW_Gypsum.xlsx")
-    
-    # modify ROI based on prior analysis (x, y, width, height)
-    roi = (100, 100, 200, 200)  # Example ROI for IR features extraction
-    i_spot_center = np.array([329, 331, 524])
-    j_spot_center = np.array([325, 400, 413])
-    m_array = np.array([2, 2, 2])
-    # to modify/set temporal segmentation (e.g., 3 segments)
+    dataset_folder = os.path.join(os.getcwd(), "dataset_new")
+    excel_path = os.path.join(os.getcwd(), "dataset_new", "DAQ_LW_Gypsum.xlsx")
+
+    # Example ROI for IR-based gradient features (applied to IRVideoProcessing)
+    roi = (100, 100, 200, 200)
     num_segments = 3
-    
-    df = process_dataset(dataset_folder, excel_path, num_segments=num_segments, roi=roi,
-                         i_spot_center=i_spot_center, j_spot_center=j_spot_center, m_array=m_array)
+
+    df = process_dataset(dataset_folder, excel_path, num_segments=num_segments, roi=roi)
     if df.empty:
         print("No data processed. Check your dataset folder and Excel file.")
     else:
-        print("Extracted Feature DataFrame:")
+        print("\nExtracted Feature DataFrame:")
         print(df.head())
         train_and_evaluate(df)
         plot_learning_curve(df)
